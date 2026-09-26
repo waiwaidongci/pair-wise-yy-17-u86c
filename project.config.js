@@ -6,8 +6,10 @@ module.exports = {
     '常规观察': 'ok',
     '正常': 'ok',
     '已复查': 'ok',
+    '复查达标': 'ok',
     '重点保护': 'warn',
     '异常待复查': 'bad',
+    '复查未达标': 'bad',
     '暂停开放': 'bad'
   },
   collections: {
@@ -26,7 +28,7 @@ module.exports = {
       label: '趋势看板',
       type: 'dashboard',
       focusTitle: '异常与复查',
-      focus: { collection: 'surveys', field: 'status', values: ['异常待复查'], limit: 8 }
+      focus: { collection: 'surveys', field: 'status', values: ['异常待复查', '已复查'], limit: 8 }
     },
     {
       id: 'sites',
@@ -66,18 +68,29 @@ module.exports = {
       formTitle: '登记巡测',
       listTitle: '巡测历史',
       submitLabel: '保存巡测',
-      searchPlaceholder: '搜索人员、干扰痕迹、照片',
-      searchFields: ['surveyor', 'disturbance', 'photoUrl'],
+      searchPlaceholder: '搜索人员、复查人、干扰痕迹、照片',
+      searchFields: ['surveyor', 'reviewer', 'disturbance', 'photoUrl'],
       statusField: 'status',
       statusOptions: ['正常', '异常待复查', '已复查'],
       titleFields: ['surveyor', 'date'],
       relation: { collection: 'sites', localKey: 'siteId', labelFields: ['cave', 'zone', 'pointCode'] },
-      summaryFields: ['disturbance', 'reviewNote'],
+      summaryFields: ['disturbance'],
       detailFields: [
         { label: '温度', name: 'temperature' },
         { label: '湿度', name: 'humidity' },
         { label: 'CO2', name: 'co2' }
       ],
+      review: {
+        conclusionField: 'reviewConclusion',
+        personField: 'reviewer',
+        atField: 'reviewedAt',
+        noteField: 'reviewNote',
+        fields: [
+          { label: '复查温度', name: 'reviewTemp' },
+          { label: '复查湿度', name: 'reviewHumidity' },
+          { label: '复查CO2', name: 'reviewCo2' }
+        ]
+      },
       defaults: { status: '正常', reviewNote: '' },
       fields: [
         { label: '样点', name: 'siteId', type: 'relation', collection: 'sites', labelFields: ['cave', 'zone', 'pointCode'], required: true, wide: true },
@@ -101,11 +114,31 @@ module.exports = {
       label: '标记异常',
       collection: 'surveys',
       relation: { collection: 'sites', localKey: 'siteId' },
+      showWhen: { field: 'status', value: '正常' },
+      guards: [{ op: 'eq', left: 'item.status', right: '正常', message: '仅正常记录可标记异常' }],
       patches: [
         { field: 'status', value: '异常待复查' },
         { target: 'related', field: 'protectedStatus', value: '重点保护' }
       ]
     },
-    { id: 'survey-review', label: '完成复查', collection: 'surveys', patches: [{ field: 'status', value: '已复查' }, { field: 'reviewNote', value: '异常已复核' }] }
+    {
+      id: 'survey-review',
+      label: '复查登记',
+      type: 'review',
+      collection: 'surveys',
+      relation: { collection: 'sites', localKey: 'siteId' },
+      showWhen: { field: 'status', value: '异常待复查' },
+      formTitle: '复查登记',
+      submitLabel: '提交复查',
+      hint: '温度不超过基准0.5℃、湿度不低于基准2个百分点、CO2不超过基准50ppm时达标结案并恢复常规观察；任一项超标则保留重点保护并留存复查结果。',
+      limits: { tempDelta: 0.5, humidityDelta: 2, co2Delta: 50 },
+      fields: [
+        { label: '复查人', name: 'reviewer', required: true },
+        { label: '复查温度(℃)', name: 'reviewTemp', type: 'number', step: '0.01', required: true },
+        { label: '复查湿度(%)', name: 'reviewHumidity', type: 'number', step: '0.01', required: true },
+        { label: '复查CO2(ppm)', name: 'reviewCo2', type: 'number', step: '1', required: true },
+        { label: '复查说明', name: 'reviewNote', type: 'textarea', required: true, wide: true }
+      ]
+    }
   ]
 };

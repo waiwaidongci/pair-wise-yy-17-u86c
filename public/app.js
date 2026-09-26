@@ -71,6 +71,7 @@ function optionList(items, labelFields) {
 function formField(field) {
   const required = field.required ? 'required' : '';
   const value = field.default ? `value="${escapeHtml(field.default)}"` : '';
+  const step = field.step ? `step="${escapeHtml(field.step)}"` : '';
   if (field.type === 'textarea') {
     return `<label class="${field.wide ? 'wide' : ''}">${field.label}<textarea name="${field.name}" ${required}></textarea></label>`;
   }
@@ -81,7 +82,7 @@ function formField(field) {
     const items = state.db[field.collection] || [];
     return `<label class="${field.wide ? 'wide' : ''}">${field.label}<select name="${field.name}" ${required}>${optionList(items, field.labelFields)}</select></label>`;
   }
-  return `<label class="${field.wide ? 'wide' : ''}">${field.label}<input type="${field.type || 'text'}" name="${field.name}" ${value} ${required}></label>`;
+  return `<label class="${field.wide ? 'wide' : ''}">${field.label}<input type="${field.type || 'text'}" name="${field.name}" ${value} ${step} ${required}></label>`;
 }
 
 function pill(value, tone = '') {
@@ -129,6 +130,30 @@ function renderStats() {
   }).join('')}</div>`;
 }
 
+function actionVisible(action, item) {
+  if (!action.showWhen) return true;
+  return item[action.showWhen.field] === action.showWhen.value;
+}
+
+function reviewHtml(item, view) {
+  const review = view.review;
+  if (!review || !item[review.conclusionField]) return '';
+  const conclusion = item[review.conclusionField];
+  const person = item[review.personField] || '-';
+  const at = item[review.atField] ? fmtDate(item[review.atField]) : '-';
+  const metrics = (review.fields || []).map((field) => {
+    const value = item[field.name] ?? '-';
+    return `<div>${escapeHtml(field.label)}<br><strong>${escapeHtml(value)}</strong></div>`;
+  }).join('');
+  const note = item[review.noteField] ? `<p class="review-note">${escapeHtml(item[review.noteField])}</p>` : '';
+  return `<div class="review">
+    <div class="review-head"><h4>复查结果</h4>${pill(conclusion, toneFor(conclusion))}</div>
+    <div class="meta">复查人：${escapeHtml(person)} · ${escapeHtml(at)}</div>
+    <div class="detail">${metrics}</div>
+    ${note}
+  </div>`;
+}
+
 function renderCard(item, collection, view) {
   const title = view.titleFields.map((field) => item[field]).filter(Boolean).join(' / ') || item.id;
   const statusValue = item[view.statusField];
@@ -140,7 +165,7 @@ function renderCard(item, collection, view) {
   }).join('');
   const summary = (view.summaryFields || []).map((field) => item[field]).filter(Boolean).join(' · ');
   const actions = state.config.actions
-    .filter((action) => action.collection === collection)
+    .filter((action) => action.collection === collection && actionVisible(action, item))
     .map((action) => `<button class="${action.danger ? 'danger' : 'ghost'}" data-action="${action.id}" data-id="${item.id}">${escapeHtml(action.label)}</button>`)
     .join('');
   return `<article class="card">
@@ -148,6 +173,7 @@ function renderCard(item, collection, view) {
     ${relation}
     ${summary ? `<p>${escapeHtml(summary)}</p>` : ''}
     ${details ? `<div class="detail">${details}</div>` : ''}
+    ${reviewHtml(item, view)}
     ${actions ? `<div class="actions">${actions}</div>` : ''}
     ${historyHtml(item)}
   </article>`;
@@ -216,11 +242,54 @@ async function load() {
   render();
 }
 
+function formatSigned(value) {
+  return value > 0 ? `+${value}` : String(value);
+}
+
+function reviewHintHtml(action, site) {
+  if (!site) return action.hint ? `<p class="modal-hint">${escapeHtml(action.hint)}</p>` : '';
+  const limits = action.limits || {};
+  return `<p class="modal-hint">${escapeHtml(action.hint || '')}</p>
+    <p class="modal-hint">关联样点基准：温度 ${escapeHtml(site.baselineTemp)}℃（允许至 ${formatSigned2(Number(site.baselineTemp) + Number(limits.tempDelta || 0))}℃）
+    · 湿度 ${escapeHtml(site.baselineHumidity)}%（不低于 ${Number(site.baselineHumidity) - Number(limits.humidityDelta || 0)}%）
+    · CO2 ${escapeHtml(site.baselineCo2)}ppm（不超过 ${Number(site.baselineCo2) + Number(limits.co2Delta || 0)}ppm）</p>`;
+}
+
+function formatSigned2(value) {
+  return String(Math.round((value + Number.EPSILON) * 100) / 100);
+}
+
+function openReviewModal(action, item) {
+  const modal = $('#reviewModal');
+  const site = state.db.sites?.find((entry) => entry.id === item.siteId);
+  $('#reviewModalTitle').textContent = action.formTitle || action.label;
+  $('#reviewBaseline').innerHTML = reviewHintHtml(action, site);
+  $('#reviewFields').innerHTML = action.fields.map(formField).join('');
+  modal.dataset.action = action.id;
+  modal.dataset.id = item.id;
+  modal.hidden = false;
+}
+
+function closeReviewModal() {
+  const modal = $('#reviewModal');
+  modal.hidden = true;
+  $('#reviewForm').reset();
+  delete modal.dataset.action;
+  delete modal.dataset.id;
+}
+
 document.addEventListener('click', async (event) => {
   const tab = event.target.closest('.tab');
-  const action = event.target.closest('[data-action]');
+  const actionEl = event.target.closest('[data-action]');
   if (tab) setTab(tab.dataset.tab);
-  if (action) {
+  if (actionEl) {
+    const action = state.config.actions.find((entry) => entry.id === actionEl.dataset.action);
+    const item = state.db[action.collection]?.find((entry) => entry.id === actionEl.dataset.id);
+    if (!item) return;
+    if (action.type === 'review') {
+      openReviewModal(action, item);
+      return;
+    }
     try {
       await api(`/api/action/${action.dataset.action}/${action.dataset.id}`, { method: 'POST' });
       await load();
@@ -229,6 +298,34 @@ document.addEventListener('click', async (event) => {
       toast(error.message);
     }
   }
+});
+
+document.addEventListener('submit', async (event) => {
+  if (event.target.id !== 'reviewForm') return;
+  event.preventDefault();
+  const modal = $('#reviewModal');
+  const action = state.config.actions.find((entry) => entry.id === modal.dataset.action);
+  const form = event.target;
+  const payload = Object.fromEntries(new FormData(form).entries());
+  for (const field of action.fields || []) {
+    if (field.type === 'number') payload[field.name] = Number(payload[field.name] || 0);
+  }
+  try {
+    const result = await api(`/api/action/${modal.dataset.action}/${modal.dataset.id}`, {
+      method: 'POST',
+      body: JSON.stringify(payload)
+    });
+    closeReviewModal();
+    await load();
+    toast(result.passed ? '复查达标，已恢复常规观察' : '复查未达标，保留重点保护');
+  } catch (error) {
+    toast(error.message);
+  }
+});
+
+$('#reviewCancel').addEventListener('click', closeReviewModal);
+$('#reviewOverlay').addEventListener('click', (event) => {
+  if (event.target === $('#reviewOverlay')) closeReviewModal();
 });
 
 document.addEventListener('input', (event) => {
