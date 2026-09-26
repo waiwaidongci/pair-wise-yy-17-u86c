@@ -94,10 +94,21 @@ app.post('/api/action/:actionId/:id', async (req, res) => {
   if (!action) return res.status(404).json({ error: 'unknown action' });
   const item = db[action.collection]?.find((entry) => entry.id === req.params.id);
   if (!item) return res.status(404).json({ error: 'not found' });
-  const result = runAction(db, action, item);
+  const body = { ...(req.body || {}) };
+  for (const field of action.form || []) {
+    const raw = body[field.name];
+    if (field.required && (raw === undefined || raw === null || raw === '')) {
+      return res.status(400).json({ error: `请填写${field.label}` });
+    }
+    if (field.type === 'number' && raw !== undefined && raw !== '') {
+      body[field.name] = Number(raw);
+      if (Number.isNaN(body[field.name])) return res.status(400).json({ error: `${field.label}需为数字` });
+    }
+  }
+  const result = runAction(db, action, item, body);
   if (result.error) return res.status(409).json({ error: result.error });
   await writeDb(db);
-  res.json(result.item);
+  res.json({ item: result.item, note: result.note || '' });
 });
 
 function getValue(source, pathName) {
@@ -119,29 +130,49 @@ function findRelated(db, relation, item) {
   return db[relation.collection]?.find((entry) => entry.id === item[relation.localKey]);
 }
 
-function runAction(db, action, item) {
-  const related = action.relation ? findRelated(db, action.relation, item) : null;
-  const context = { item, related };
-  const levelRank = { '低': 1, '中': 2, '高': 3 };
-  for (const guard of action.guards || []) {
-    const left = getValue(context, guard.left);
-    const right = guard.rightPath ? getValue(context, guard.rightPath) : guard.right;
-    if (guard.op === 'missing' && left) continue;
-    if (guard.op === 'missing' && !left) return { error: guard.message };
-    if (guard.op === 'eq' && left !== right) return { error: guard.message };
-    if (guard.op === 'neq' && left === right) return { error: guard.message };
-    if (guard.op === 'gte' && Number(left) < Number(right)) return { error: guard.message };
-    if (guard.op === 'levelGte' && (levelRank[left] || 0) < (levelRank[right] || 0)) return { error: guard.message };
-    if (guard.op === 'notIn' && guard.values.includes(left)) return { error: guard.message };
+const levelRank = { '低': 1, '中': 2, '高': 3 };
+
+function conditionRight(context, cond) {
+  const base = cond.rightPath ? getValue(context, cond.rightPath) : cond.right;
+  return cond.margin === undefined ? base : Number(base) + Number(cond.margin);
+}
+
+function testCondition(context, cond) {
+  const left = getValue(context, cond.left);
+  const right = conditionRight(context, cond);
+  switch (cond.op) {
+    case 'missing': return Boolean(left);
+    case 'eq': return left === right;
+    case 'neq': return left !== right;
+    case 'gte': return Number(left) >= Number(right);
+    case 'lte': return Number(left) <= Number(right);
+    case 'gt': return Number(left) > Number(right);
+    case 'lt': return Number(left) < Number(right);
+    case 'levelGte': return (levelRank[left] || 0) >= (levelRank[right] || 0);
+    case 'notIn': return !cond.values.includes(left);
+    default: return true;
   }
-  for (const patch of action.patches || []) {
+}
+
+function runAction(db, action, item, body = {}) {
+  const related = action.relation ? findRelated(db, action.relation, item) : null;
+  const context = { item, related, body };
+  for (const guard of action.guards || []) {
+    if (!testCondition(context, guard)) return { error: guard.message };
+  }
+  const branch = (action.branches || []).find((entry) => (entry.when || []).every((cond) => testCondition(context, cond)));
+  const note = branch?.note || action.note || '';
+  const patches = [...(action.patches || []), ...(branch?.patches || [])];
+  const touched = new Map();
+  const markTouched = (target, noteText) => {
+    if (target && !touched.has(target)) touched.set(target, noteText);
+  };
+  for (const patch of patches) {
     const target = patch.target === 'related' ? related : item;
     if (!target) continue;
     const next = patch.valuePath ? getValue(context, patch.valuePath) : patch.value;
     setValue(target, patch.field, next);
-    target.updatedAt = new Date().toISOString();
-    target.history = target.history || [];
-    target.history.unshift(stamp(action.label, action.note || '状态流转'));
+    markTouched(target, note || '状态流转');
   }
   for (const delta of action.deltas || []) {
     const target = delta.target === 'related' ? related : item;
@@ -151,11 +182,15 @@ function runAction(db, action, item) {
     const amount = sourceAmount * multiplier;
     const current = Number(getValue({ target }, `target.${delta.field}`) || 0);
     setValue(target, delta.field, current + amount);
-    target.updatedAt = new Date().toISOString();
-    target.history = target.history || [];
-    target.history.unshift(stamp(action.label, action.note || '数量调整'));
+    markTouched(target, note || '数量调整');
   }
-  return { item };
+  const now = new Date().toISOString();
+  for (const [target, noteText] of touched) {
+    target.updatedAt = now;
+    target.history = target.history || [];
+    target.history.unshift(stamp(action.label, noteText));
+  }
+  return { item, note };
 }
 
 app.listen(PORT, () => {

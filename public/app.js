@@ -71,6 +71,7 @@ function optionList(items, labelFields) {
 function formField(field) {
   const required = field.required ? 'required' : '';
   const value = field.default ? `value="${escapeHtml(field.default)}"` : '';
+  const step = field.step ? `step="${escapeHtml(field.step)}"` : '';
   if (field.type === 'textarea') {
     return `<label class="${field.wide ? 'wide' : ''}">${field.label}<textarea name="${field.name}" ${required}></textarea></label>`;
   }
@@ -81,7 +82,7 @@ function formField(field) {
     const items = state.db[field.collection] || [];
     return `<label class="${field.wide ? 'wide' : ''}">${field.label}<select name="${field.name}" ${required}>${optionList(items, field.labelFields)}</select></label>`;
   }
-  return `<label class="${field.wide ? 'wide' : ''}">${field.label}<input type="${field.type || 'text'}" name="${field.name}" ${value} ${required}></label>`;
+  return `<label class="${field.wide ? 'wide' : ''}">${field.label}<input type="${field.type || 'text'}" name="${field.name}" ${value} ${step} ${required}></label>`;
 }
 
 function pill(value, tone = '') {
@@ -108,6 +109,39 @@ function values(form, view) {
   return { ...view.defaults, ...payload };
 }
 
+function openActionForm(action) {
+  return new Promise((resolve) => {
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay';
+    overlay.innerHTML = `
+      <form class="panel modal">
+        <h2>${escapeHtml(action.label)}</h2>
+        <div class="form-grid">${action.form.map(formField).join('')}</div>
+        <div class="actions">
+          <button type="submit">${escapeHtml(action.submitLabel || action.label)}</button>
+          <button type="button" class="ghost" data-cancel>取消</button>
+        </div>
+      </form>`;
+    document.body.appendChild(overlay);
+    const close = (payload) => {
+      overlay.remove();
+      resolve(payload);
+    };
+    overlay.querySelector('form').addEventListener('submit', (event) => {
+      event.preventDefault();
+      const payload = Object.fromEntries(new FormData(event.target).entries());
+      for (const field of action.form) {
+        if (field.type === 'number') payload[field.name] = Number(payload[field.name] || 0);
+      }
+      close(payload);
+    });
+    overlay.querySelector('[data-cancel]').addEventListener('click', () => close(null));
+    overlay.addEventListener('click', (event) => {
+      if (event.target === overlay) close(null);
+    });
+  });
+}
+
 function renderTabs() {
   $('#tabs').innerHTML = state.config.views.map((view, index) => `
     <button class="tab${index === 0 ? ' active' : ''}" data-tab="${view.id}">${escapeHtml(view.label)}</button>
@@ -132,19 +166,26 @@ function renderStats() {
 function renderCard(item, collection, view) {
   const title = view.titleFields.map((field) => item[field]).filter(Boolean).join(' / ') || item.id;
   const statusValue = item[view.statusField];
+  const extraPills = (view.pillFields || [])
+    .filter((field) => item[field])
+    .map((field) => pill(item[field], toneFor(item[field])))
+    .join('');
   const relation = view.relation ? `<div class="meta">${escapeHtml(relationLabel(view.relation, item[view.relation.localKey]))}</div>` : '';
-  const details = (view.detailFields || []).map((field) => {
-    const raw = item[field.name];
-    const value = field.type === 'relation' ? relationLabel(field, raw) : raw;
-    return `<div>${escapeHtml(field.label)}<br><strong>${escapeHtml(value || '-')}</strong></div>`;
-  }).join('');
+  const details = (view.detailFields || [])
+    .filter((field) => !field.optional || (item[field.name] !== undefined && item[field.name] !== null && item[field.name] !== ''))
+    .map((field) => {
+      const raw = item[field.name];
+      const value = field.type === 'relation' ? relationLabel(field, raw) : raw;
+      return `<div>${escapeHtml(field.label)}<br><strong>${escapeHtml(value || '-')}</strong></div>`;
+    }).join('');
   const summary = (view.summaryFields || []).map((field) => item[field]).filter(Boolean).join(' · ');
   const actions = state.config.actions
     .filter((action) => action.collection === collection)
+    .filter((action) => !action.visibleWhen || action.visibleWhen.values.includes(item[action.visibleWhen.field]))
     .map((action) => `<button class="${action.danger ? 'danger' : 'ghost'}" data-action="${action.id}" data-id="${item.id}">${escapeHtml(action.label)}</button>`)
     .join('');
   return `<article class="card">
-    <div class="card-head"><h3>${escapeHtml(title)}</h3>${statusValue ? pill(statusValue, toneFor(statusValue)) : ''}</div>
+    <div class="card-head"><h3>${escapeHtml(title)}</h3><div class="pills">${statusValue ? pill(statusValue, toneFor(statusValue)) : ''}${extraPills}</div></div>
     ${relation}
     ${summary ? `<p>${escapeHtml(summary)}</p>` : ''}
     ${details ? `<div class="detail">${details}</div>` : ''}
@@ -218,13 +259,16 @@ async function load() {
 
 document.addEventListener('click', async (event) => {
   const tab = event.target.closest('.tab');
-  const action = event.target.closest('[data-action]');
+  const actionBtn = event.target.closest('[data-action]');
   if (tab) setTab(tab.dataset.tab);
-  if (action) {
+  if (actionBtn) {
+    const action = state.config.actions.find((entry) => entry.id === actionBtn.dataset.action);
     try {
-      await api(`/api/action/${action.dataset.action}/${action.dataset.id}`, { method: 'POST' });
+      const body = action?.form ? await openActionForm(action) : {};
+      if (body === null) return;
+      const result = await api(`/api/action/${actionBtn.dataset.action}/${actionBtn.dataset.id}`, { method: 'POST', body: JSON.stringify(body) });
       await load();
-      toast('已更新');
+      toast(result?.note ? `${action?.label || '操作'}：${result.note}` : '已更新');
     } catch (error) {
       toast(error.message);
     }
